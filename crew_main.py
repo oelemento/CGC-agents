@@ -1,4 +1,4 @@
-# crew_main.py (Sequential Process + Peer Delegation + Input Fixes)
+# crew_main.py (Sequential Process + Peer Delegation + Input Fixes v2)
 
 import os
 import traceback
@@ -38,15 +38,17 @@ class FeedbackTracker:
 
     def get_last_feedback(self):
         """Returns the most recent feedback entry."""
-        # Reset flag after getting feedback, assuming it's consumed by the process
-        # self.feedback_provided_since_last_run = False # Let's not reset here, but when feedback is actually used/checked
+        # Let's not reset the flag here, but when feedback is actually used/checked
         return self.last_feedback
 
     def reset_feedback_flag(self):
+         """Resets the flag indicating if new feedback was provided."""
          self.feedback_provided_since_last_run = False
 
     def is_approval(self, feedback_text):
         """ Checks if feedback text clearly indicates approval. """
+        if not isinstance(feedback_text, str): # Handle None or other types
+             return False
         approval_terms = ['ok', 'yes', 'approve', 'good', 'proceed', 'looks good', 'fine', 'accept']
         # Check if feedback is exactly "OK" (case-insensitive) or contains other approval terms
         return feedback_text.strip().lower() == "ok" or any(term in feedback_text.lower() for term in approval_terms)
@@ -58,7 +60,6 @@ class FeedbackTracker:
 feedback_tracker = FeedbackTracker()
 
 # --- Custom Tools ---
-# Assume PDFExtractionTool, KnowledgeAppendTool, KnowledgeReaderTool definitions are here
 class PDFExtractionTool(BaseTool):
     name: str = "PDF Text Extractor"
     description: str = "Extracts text content from a given local PDF file path. Input must be the file path string."
@@ -138,9 +139,10 @@ knowledge_reader_agent = Agent(
 
 hypothesis_synthesizer_agent = Agent(
     role='Hypothesis Synthesizer',
+    # **** REMOVED {user_feedback} from goal to simplify interpolation ****
     goal="""Generate 2-3 specific, testable, mechanistic hypotheses based *only* on the provided Knowledge Base Content context. 
-    Incorporate user feedback ('{user_feedback}') if provided for refinement. 
-    Cite supporting facts/sources. If feasibility is uncertain, clearly state it.""", # User feedback needed here
+    Incorporate user feedback provided in the task description if it requires refinement. 
+    Cite supporting facts/sources. If feasibility is uncertain, clearly state it.""",
     backstory="""Creative scientific thinker specializing in hypothesis generation from provided text data. 
     Focuses on evidence. **Can delegate specific feasibility check questions to the Feasibility_Assessor if a hypothesis seems borderline or requires specific experimental insight it lacks.**""",
     tools=[],
@@ -150,9 +152,10 @@ hypothesis_synthesizer_agent = Agent(
 
 feasibility_assessor_agent = Agent(
     role='Feasibility Assessor',
-    goal="""Evaluate experimental testability of provided hypotheses ('{hypotheses_context}') using standard lab resources. 
-    Suggest concrete approaches and challenges.""", # Hypotheses context needed here
-    backstory="""Pragmatic experimental biologist. Assesses feasibility based on provided hypothesis text. 
+    # **** REMOVED {hypotheses_context} from goal to simplify interpolation ****
+    goal="""Evaluate experimental testability of provided hypotheses using standard lab resources. 
+    Suggest concrete approaches and challenges.""",
+    backstory="""Pragmatic experimental biologist. Assesses feasibility based on provided hypothesis text from task description. 
     **If assessment requires deeper synthesis of original facts not present in the hypothesis text itself, can delegate a query back to the Hypothesis_Synthesizer (providing necessary context).**""",
     tools=[],
     llm=llm, verbose=True,
@@ -161,15 +164,17 @@ feasibility_assessor_agent = Agent(
 
 feedback_evaluator_agent = Agent(
     role='Feedback Evaluator',
-    goal="""Analyze user feedback ('{human_feedback}') on hypotheses ('{hypotheses_context}') to determine if it signifies approval (proceed) or requires revision. 
-    Output a structured JSON evaluation.""", # Needs feedback and hypotheses
+     # **** REMOVED {human_feedback} and {hypotheses_context} from goal to simplify interpolation ****
+    goal="""Analyze user feedback on hypotheses provided in the task description to determine if it signifies approval (proceed) or requires revision. 
+    Output a structured JSON evaluation.""",
     backstory="Interprets user feedback accurately.",
     tools=[], llm=llm, verbose=True, allow_delegation=False
 )
 
 hypothesis_presenter_agent = Agent(
     role='Hypothesis Presenter',
-    goal="""Clearly present provided hypotheses text ('{hypotheses_context}') to the user for review.""", # Needs hypotheses
+     # **** REMOVED {hypotheses_context} from goal to simplify interpolation ****
+    goal="""Clearly present provided hypotheses text from task description to the user for review.""",
     backstory="Formats and displays information clearly.",
     tools=[], llm=llm, verbose=True, allow_delegation=False
 )
@@ -187,6 +192,7 @@ task_read_knowledge_base = Task(
     agent=knowledge_reader_agent
 )
 
+# **** MODIFIED ****: Pass needed variables explicitly in description
 task_synthesize_hypotheses = Task(
     description="""**Using the Knowledge Base Content provided in the context**, generate 2-3 novel, specific, testable mechanistic hypotheses about early lung cancer/GGOs mechanisms (intrinsic/TME). 
     Suggest potential therapeutic targets/strategies. Provide rationale citing supporting facts/sources from the provided context. 
@@ -194,26 +200,29 @@ task_synthesize_hypotheses = Task(
     **Collaboration Hint:** If you create a hypothesis but are unsure about its experimental feasibility using standard lab techniques (cell lines, basic assays), consider delegating a specific question to the `Feasibility_Assessor` agent.""",
     expected_output="2-3 clear, mechanistic hypotheses based *only* on the provided knowledge base context, with rationale linked to specific facts/sources. May include delegation attempts.",
     agent=hypothesis_synthesizer_agent,
-    context=[task_read_knowledge_base] # Depends on KB reading
+    context=[task_read_knowledge_base]
 )
 
+# **** MODIFIED ****: Pass needed variables explicitly in description
 task_present_hypotheses = Task(
-    description="""Present the generated hypotheses (from the previous task context, available as '{hypotheses_context}') clearly to the user for review. 
+    description="""Present the generated hypotheses (provided as '{hypotheses_context}') clearly to the user for review. 
     Add the message: 'Please review these hypotheses. Feedback will be collected directly.'""",
     expected_output="Formatted display of hypotheses for the user.",
     agent=hypothesis_presenter_agent,
-    # Context dependency managed in main loop (depends on synthesis or refinement)
+    # Context dependency managed in main loop
 )
 
+# **** MODIFIED ****: Pass needed variables explicitly in description
 task_evaluate_feedback = Task(
     description="""Analyze the provided human feedback ('{human_feedback}') on the presented hypotheses ('{hypotheses_context}'). 
     Determine if feedback indicates approval ('proceed': true) or requires revision ('proceed': false). 
-    Output JSON: {"proceed": true/false, "reasoning": "...", "key_points": [], "suggested_changes": []}""",
+    Output JSON: {{"proceed": true/false, "reasoning": "...", "key_points": [], "suggested_changes": []}}""", # Escaped braces for JSON literal
     expected_output="JSON object evaluating the feedback.",
     agent=feedback_evaluator_agent,
     # Context dependency managed in main loop
 )
 
+# **** MODIFIED ****: Pass needed variables explicitly in description
 task_assess_feasibility = Task(
     description="""Assess experimental feasibility for the provided hypotheses ('{hypotheses_context}'). 
     For each hypothesis, suggest 1-2 concrete experimental approaches using standard resources (cells, organoids, mice, assays). 
@@ -224,20 +233,21 @@ task_assess_feasibility = Task(
     # Context dependency managed in main loop
 )
 
-# **** MODIFIED TASK DESCRIPTION ****
+# **** MODIFIED ****: Pass needed variables explicitly in description AND strengthened prompt
 task_refine_hypotheses_feedback = Task(
     description="""**Refine hypotheses based on negative user feedback.** The user provided feedback ('{human_feedback}') indicating they did not like the previous hypotheses ('{hypotheses_context}'). 
     Feedback Evaluation: '{feedback_evaluation_context}'. 
-    **Your goal is to generate a *completely NEW set* of 2-3 hypotheses.** Use the provided Knowledge Base Content ('{knowledge_base_context}') to formulate these new hypotheses, ensuring they are different from the previous set and grounded in the KB facts. Address any specific 'suggested_changes' if provided in the evaluation context.""", # Emphasize NEW set
+    **Your goal is to generate a *completely NEW set* of 2-3 hypotheses.** Use the provided Knowledge Base Content ('{knowledge_base_content}') to formulate these new hypotheses, ensuring they are different from the previous set and grounded in the KB facts. Address any specific 'suggested_changes' if provided in the evaluation context.""",
     expected_output="A *new* list of 2-3 hypotheses addressing user feedback, grounded in provided KB facts.",
     agent=hypothesis_synthesizer_agent,
     # Context dependency managed in main loop
 )
 
+# **** MODIFIED ****: Pass needed variables explicitly in description
 task_refine_hypotheses_feasibility = Task(
     description="""**Refine hypotheses based on feasibility assessment.** Original Hypotheses: '{hypotheses_context}'. 
     Feasibility Report: '{feasibility_context}'.
-    Knowledge Base Content: '{knowledge_base_context}'
+    Knowledge Base Content: '{knowledge_base_content}'
     Modify hypotheses using the provided Knowledge Base Content to improve experimental tractability based on the report. 
     Explain refinements in rationale, referencing the KB Content. Output the final revised list.""",
     expected_output="Revised list of 2-3 hypotheses optimized for testability, grounded in provided KB facts.",
@@ -310,9 +320,10 @@ def collect_direct_feedback():
     combined = " ".join(user_input_lines).strip()
     feedback_tracker.add_feedback(combined or "OK") # Record feedback (or implicit OK)
     last = feedback_tracker.get_last_feedback() # Get the feedback just added
-    feedback_tracker.reset_feedback_flag() # Reset the flag as we are about to process it
+    # Don't reset flag here, reset it after it's used in the loop
     print(f"\n--- Feedback Received This Cycle: '{last}' ---")
     return last
+
 
 # --- Main Workflow Logic ---
 def main():
@@ -322,6 +333,7 @@ def main():
 
     # --- Step 1: Fact Extraction (Optional) ---
     if not SKIP_FACT_EXTRACTION:
+        # ... (fact extraction logic remains the same) ...
         if os.path.exists(kb_file):
             print(f"Clearing existing KB file: {kb_file}")
             try: os.remove(kb_file)
@@ -346,6 +358,7 @@ def main():
             try: extraction_crew.kickoff(); print("--- Fact Extraction Finished ---")
             except Exception as e: print(f"\n--- ERROR during Extraction Crew: {e} ---"); traceback.print_exc(); sys.exit(1)
         else: print("--- No extraction tasks created. ---"); sys.exit(1)
+
     else:
         print(f"Skipping fact extraction. Using existing KB: {kb_file}")
         if not os.path.exists(kb_file) or os.path.getsize(kb_file) == 0: print(f"Warning: KB {kb_file} missing or empty!")
@@ -356,8 +369,9 @@ def main():
     knowledge_base_content = ""
     try:
         result = analysis_crew.kickoff()
+        # Accessing raw attribute is safer if available
         kb_content_result = getattr(result, 'raw', str(result))
-        if "ERROR:" in kb_content_result or "failed" in kb_content_result.lower() or "empty" in kb_content_result.lower() or "not found" in kb_content_result.lower():
+        if "ERROR:" in kb_content_result or "failed" in kb_content_result.lower() or "empty" in kb_content_result.lower() or "not found" in kb_content_result.lower() :
              print(f"\n--- ERROR or Empty KB: Reading knowledge base failed: {kb_content_result} ---"); sys.exit(1)
         knowledge_base_content = kb_content_result
         print("--- Knowledge Base Read Successfully ---")
@@ -365,26 +379,21 @@ def main():
 
     # --- Step 3: Initial Hypothesis Synthesis ---
     print("\n\n--- Starting Initial Hypothesis Synthesis ---")
-    # Ensure inputs includes all keys potentially referenced by agents/tasks in the crew run
+    # **** MODIFIED: Define inputs dictionary with all potential keys ****
     synthesis_inputs = {
         'user_feedback': feedback_tracker.get_last_feedback(),
-        # Other keys needed by any agent/task in this crew run?
-        # The tasks in this run are task_read_knowledge_base, task_synthesize_hypotheses
-        # Agents involved: knowledge_reader_agent, hypothesis_synthesizer_agent
-        # Let's check their goals/descriptions:
-        # synthesizer needs 'user_feedback'
-        # tasks need 'user_feedback'
-        # Add dummy values for others expected later if they cause errors now
+        'knowledge_base_content': knowledge_base_content, # Passed via context, but include just in case
         'hypotheses_context': '',
         'human_feedback': '',
         'feedback_evaluation_context': '{}',
-        'knowledge_base_content': knowledge_base_content, # Though passed by context, sometimes explicit helps
         'feasibility_context': ''
     }
-    analysis_crew.tasks = [task_read_knowledge_base, task_synthesize_hypotheses]
+    # Assign tasks for this specific run (KB read already done, its context is available)
+    analysis_crew.tasks = [task_synthesize_hypotheses]
     hypotheses_result = None
     try:
         result_obj = analysis_crew.kickoff(inputs=synthesis_inputs)
+        # Use the result directly, assuming it's the final output of the last task
         hypotheses_result = getattr(result_obj, 'raw', str(result_obj))
         if not hypotheses_result or "ERROR:" in hypotheses_result or "failed" in hypotheses_result.lower():
              print(f"\n--- ERROR: Hypothesis Synthesis failed: {hypotheses_result} ---"); sys.exit(1)
@@ -404,28 +413,27 @@ def main():
         # 4a: Present Hypotheses
         print("--- Presenting Hypotheses ---")
         analysis_crew.tasks = [task_present_hypotheses]
-        # **** FIX: Add all potentially needed inputs for interpolation ****
+        # **** MODIFIED: Define inputs dictionary with all potential keys ****
         present_inputs = {
             'hypotheses_context': current_hypotheses,
-            'user_feedback': feedback_tracker.get_last_feedback(), # Synthesizer goal might be checked
-            'human_feedback': '', # Placeholder
-            'feedback_evaluation_context': '{}', # Placeholder
-            'knowledge_base_content': knowledge_base_content, # Placeholder/Context
-            'feasibility_context': '' # Placeholder
+            'user_feedback': feedback_tracker.get_last_feedback(),
+            'human_feedback': '',
+            'feedback_evaluation_context': '{}',
+            'knowledge_base_content': knowledge_base_content,
+            'feasibility_context': ''
         }
         try:
+             # Pass the comprehensive inputs dictionary
              analysis_crew.kickoff(inputs=present_inputs)
         except Exception as e:
-            # Catch potential KeyError here from interpolation
-            print(f"Error presenting hypotheses (likely input key error): {e}")
-            # Attempt to print directly as fallback
+            print(f"Error presenting hypotheses: {e}")
             print("\n--- Fallback Hypothesis Presentation ---")
             print(current_hypotheses)
             print("\nPlease review these hypotheses. Feedback will be collected directly.")
 
-
         # 4b: Collect Feedback
         human_feedback = collect_direct_feedback()
+        feedback_tracker.reset_feedback_flag() # Reset flag now that feedback is collected
 
         # 4c: Check for Approval
         if feedback_tracker.is_approval(human_feedback):
@@ -441,14 +449,14 @@ def main():
 
         print("--- Evaluating Feedback ---")
         analysis_crew.tasks = [task_evaluate_feedback]
-         # **** FIX: Add all potentially needed inputs for interpolation ****
+        # **** MODIFIED: Define inputs dictionary with all potential keys ****
         eval_inputs = {
             'human_feedback': human_feedback,
             'hypotheses_context': current_hypotheses,
-            'user_feedback': human_feedback, # Synthesizer goal might be checked
-            'feedback_evaluation_context': '{}', # Placeholder
-            'knowledge_base_content': knowledge_base_content, # Placeholder/Context
-            'feasibility_context': '' # Placeholder
+            'user_feedback': human_feedback, # Use current feedback for user_feedback too
+            'feedback_evaluation_context': '{}',
+            'knowledge_base_content': knowledge_base_content,
+            'feasibility_context': ''
         }
         feedback_evaluation_json = None
         try:
@@ -456,26 +464,25 @@ def main():
              eval_text = getattr(result, 'raw', str(result))
              feedback_evaluation_json = parse_json_from_llm_output(eval_text)
              print(f"--- Feedback Evaluation Result: {feedback_evaluation_json} ---")
-             # Check the actual 'proceed' value from the evaluation
              if feedback_evaluation_json.get('proceed', False):
                   print("--- Evaluator determined feedback allows proceeding. ---")
                   proceed_to_feasibility = True
-                  break # Exit feedback loop if evaluation says proceed
+                  break
         except Exception as e:
-            print(f"Error during feedback evaluation (likely input key error): {e}")
-            feedback_evaluation_json = None # Ensure reset on error
+             print(f"Error during feedback evaluation: {e}")
+             feedback_evaluation_json = None
 
         # 4e: Refine Based on Feedback (Only if evaluation didn't say proceed)
         print("--- Revision Required. Refining Hypotheses based on Feedback ---")
         analysis_crew.tasks = [task_refine_hypotheses_feedback]
-        # **** FIX: Add *all* required inputs for this task ****
+        # **** MODIFIED: Define inputs dictionary with all potential keys ****
         refine_inputs = {
              'hypotheses_context': current_hypotheses,
              'human_feedback': human_feedback,
-             'feedback_evaluation_context': json.dumps(feedback_evaluation_json or {}),
-             'knowledge_base_content': knowledge_base_content, # CRITICAL: Was missing
-             'user_feedback': human_feedback, # For synthesizer goal interpolation
-             'feasibility_context': '' # Placeholder
+             'feedback_evaluation_context': json.dumps(feedback_evaluation_json or {}), # Pass evaluation result as JSON string
+             'knowledge_base_content': knowledge_base_content, # Pass KB content
+             'user_feedback': human_feedback, # Use current feedback
+             'feasibility_context': ''
         }
         try:
              result = analysis_crew.kickoff(inputs=refine_inputs)
@@ -494,14 +501,14 @@ def main():
     if proceed_to_feasibility:
         print("\n\n--- Starting Feasibility Assessment ---")
         analysis_crew.tasks = [task_assess_feasibility]
-        # **** FIX: Add all potentially needed inputs for interpolation ****
+        # **** MODIFIED: Define inputs dictionary with all potential keys ****
         feasibility_inputs = {
             'hypotheses_context': current_hypotheses,
-            'user_feedback': feedback_tracker.get_last_feedback(), # Synthesizer goal might be checked by framework
-            'human_feedback': '', # Placeholder
-            'feedback_evaluation_context': '{}', # Placeholder
-            'knowledge_base_content': knowledge_base_content, # Placeholder/Context
-            'feasibility_context': '' # Placeholder
+            'user_feedback': feedback_tracker.get_last_feedback(), # Use last feedback status
+            'human_feedback': '',
+            'feedback_evaluation_context': '{}',
+            'knowledge_base_content': knowledge_base_content,
+            'feasibility_context': ''
             }
         try:
             result = analysis_crew.kickoff(inputs=feasibility_inputs)
@@ -517,14 +524,14 @@ def main():
     if feasibility_report:
         print("\n\n--- Starting Final Refinement based on Feasibility ---")
         analysis_crew.tasks = [task_refine_hypotheses_feasibility]
-        # **** FIX: Add all potentially needed inputs for interpolation ****
+        # **** MODIFIED: Define inputs dictionary with all potential keys ****
         refine_feas_inputs = {
              'hypotheses_context': current_hypotheses,
              'feasibility_context': feasibility_report,
-             'knowledge_base_content': knowledge_base_content, # CRITICAL: Was missing
-             'user_feedback': feedback_tracker.get_last_feedback(), # For synthesizer goal interpolation
-             'human_feedback': '', # Placeholder
-             'feedback_evaluation_context': '{}' # Placeholder
+             'knowledge_base_content': knowledge_base_content,
+             'user_feedback': feedback_tracker.get_last_feedback(),
+             'human_feedback': '',
+             'feedback_evaluation_context': '{}'
         }
         try:
             result = analysis_crew.kickoff(inputs=refine_feas_inputs)
